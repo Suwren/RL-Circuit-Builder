@@ -111,7 +111,10 @@ class CircuitEnv(gym.Env):
         
         # 4. 获取新的观测
         observation = self._get_obs()
-        info = {}
+        info = {
+            "valid_action": valid_action,
+            "simulation_result": simulation_result
+        }
         
         return observation, reward, terminated, truncated, info
 
@@ -221,16 +224,59 @@ class CircuitEnv(gym.Env):
         R_MN = -10.0  # 中惩罚: 形成无效环路 / 严重错误
         R_SP = +2.0   # 小奖励: 形成有效新环路
         R_MP = +10.0  # 中奖励: 所有电源都在环路中
-        R_BP = +100.0 # 大奖励: 功能验证通过 (伏秒平衡)
+        R_BP = +150.0 # 大奖励: 功能验证通过 (伏秒平衡)
         
         action_type = action[0]
 
         # --- 1. 过程奖励 (Step Rewards) ---
         
         if not valid_action:
-            return -1.0 # 无效动作给予惩罚 (比之前稍微重一点，因为现在动作空间更受限)
+            return -1.0 # 无效动作给予惩罚
             
-        reward = 0.0
+        reward = 1.0 # 基础奖励: 鼓励有效连接 (原为 0.5)
+        
+        # --- 过程中的启发式奖励 (面包屑) ---
+        # 鼓励将电源和开关连接在一起 (Buck 的关键第一步)
+        # 检查刚添加的边是否连接了电源和开关
+        # action: [type, comp_idx, n1, n2]
+        # 注意: 这里我们只检查刚刚放置的元件
+        # 如果放置的是开关，检查 n1, n2 是否连接了电源
+        # 如果放置的是电源，检查 n1, n2 是否连接了开关
+        
+        # 获取刚刚放置的元件实例
+        # 注意: _apply_action 已经将元件加入图中
+        # 我们需要获取刚刚操作的节点 n1, n2 (经过 _apply_action 处理后的实际节点)
+        # 由于 _apply_action 没有返回实际节点，我们需要从图中推断，或者修改 _apply_action 返回值。
+        # 简化方案：遍历该元件的所有连接。
+        
+        # 获取当前放置的元件类型
+        current_comp_idx = action[1]
+        if current_comp_idx < self.max_components:
+            # 注意: self.initial_inventory 是模板，我们需要检查图中实际连接的情况
+            # 但我们可以根据 comp_idx 知道是什么类型的元件
+            comp_template = self.initial_inventory[current_comp_idx]
+            
+            # 只有当放置的是开关或电源时才检查
+            if isinstance(comp_template, (Switch, VoltageSource)):
+                # 找到这个元件在图中的实例
+                # 遍历图中的边，找到 inventory_idx == current_comp_idx 的边
+                for u, v, data in self.circuit_graph.edges(data=True):
+                    if data.get('inventory_idx') == current_comp_idx:
+                        # 检查 u 或 v 是否连接了另一类元件
+                        target_type = VoltageSource if isinstance(comp_template, Switch) else Switch
+                        
+                        # 检查节点 u 的其他连接
+                        for _, _, other_data in self.circuit_graph.edges(u, data=True):
+                            if isinstance(other_data['component'], target_type):
+                                reward += 2.0 # 奖励电源-开关连接
+                                break
+                                
+                        # 检查节点 v 的其他连接
+                        for _, _, other_data in self.circuit_graph.edges(v, data=True):
+                            if isinstance(other_data['component'], target_type):
+                                reward += 2.0 # 奖励电源-开关连接
+                                break
+                        break
         
         # 检查是否形成了新环路
         try:
@@ -274,7 +320,7 @@ class CircuitEnv(gym.Env):
                     has_bad_loop = True
             
             if has_bad_loop:
-                reward += R_MN # 发现坏环路，惩罚
+                reward -= 50.0 # 严厉惩罚不可控回路 (原为 -10.0)
             else:
                 reward += R_SP # 发现好环路，奖励
                 
@@ -327,7 +373,44 @@ class CircuitEnv(gym.Env):
             if all_sources_in_loops and len(sources) > 0:
                 reward += R_MP # 奖励: 电源有效接入
             
-            # 检查 2: 功能性验证 (伏秒平衡)
+            # 检查 2: 桥接边检查 (Bridge Check)
+            bridges = list(nx.bridges(self.circuit_graph.to_undirected()))
+            if len(bridges) > 0:
+                reward -= 50.0 
+                return reward 
+            
+            # --- 启发式奖励 (Heuristic Rewards) ---
+            # 目的: 引导智能体跳出局部最优 (如 Vin || L || S 短路)
+            
+            # 1. 短路惩罚 (Short Circuit Penalty)
+            # 检查电压源是否在长度为 2 的环路中 (即直接并联)
+            # Vin || L -> 短路
+            # Vin || S -> 短路 (当 S 闭合时)
+            # Vin || Wire -> 短路
+            for src in sources:
+                u, v = src.nodes
+                # 检查 u, v 之间是否有其他边
+                edges = self.circuit_graph.get_edge_data(u, v)
+                if len(edges) > 1: # 超过 1 条边，说明有并联
+                    reward -= 20.0 # 惩罚电源直接并联
+            
+            # 2. 串联连接奖励 (Series Connection Reward)
+            # 鼓励电感和开关串联 (Buck 的特征)
+            # 判据: 某节点的度数为 2，且连接了一个电感和一个开关
+            for node in self.circuit_graph.nodes():
+                if self.circuit_graph.degree(node) == 2:
+                    # 获取连接该节点的两条边
+                    edges = list(self.circuit_graph.edges(node, data=True))
+                    comp1 = edges[0][2]['component']
+                    comp2 = edges[1][2]['component']
+                    
+                    types = [type(comp1), type(comp2)]
+                    if Inductor in types and Switch in types:
+                        reward += 5.0 # 奖励电感-开关串联
+                        
+            # 检查 3: 功能性验证 (伏秒平衡)
+
+            # 检查 3: 功能性验证 (伏秒平衡)
             from utils.mode_analysis import analyze_switching_modes
             
             # 连通性检查 (现在由构建过程保证，但为了保险还是留着)
@@ -381,11 +464,92 @@ class CircuitEnv(gym.Env):
                     adj[u, v] = type_id
                     adj[v, u] = type_id
         
+        # 2. 节点特征 (Node Features)
+        # Feature 0: 节点度数 (Degree)
+        # Feature 1: 是否已连接 (Binary, Degree > 0)
+        node_feats = np.zeros((self.max_nodes, 2), dtype=np.float32)
+        
+        for node in range(self.node_counter): # 只更新已存在的节点
+            degree = self.circuit_graph.degree(node)
+            node_feats[node, 0] = float(degree)
+            node_feats[node, 1] = 1.0 if degree > 0 else 0.0
+            
         return {
             "adjacency": adj,
             "inventory_mask": self.available_components.copy(),
-            "node_features": np.zeros((self.max_nodes, 2), dtype=np.float32), # 预留
+            "node_features": node_feats,
         }
+
+    def action_masks(self) -> List[bool]:
+        """
+        返回动作掩码 (Action Mask)。
+        True 表示动作有效，False 表示动作无效。
+        MaskablePPO 会使用此掩码将无效动作的概率置为 0。
+        
+        动作空间: MultiDiscrete([2, max_components, max_nodes, max_nodes])
+        展平后的维度: 2 + max_components + max_nodes + max_nodes
+        注意: MaskablePPO 期望的掩码是针对展平后的动作空间的吗？
+        不，对于 MultiDiscrete，sb3-contrib 期望返回一个列表，其中每个元素对应一个维度的掩码。
+        或者是一个拼接的大数组？
+        
+        查阅文档/源码: sb3_contrib 的 MaskablePPO 对 MultiDiscrete 的支持比较特殊。
+        通常它期望一个展平的掩码，或者针对每个维度的掩码列表。
+        但在 MultiDiscrete 情况下，MaskablePPO 目前可能只支持 Discrete 空间，或者对 MultiDiscrete 的支持有限。
+        
+        修正: sb3-contrib 的 MaskablePPO 确实支持 MultiDiscrete，但掩码必须是一个列表，
+        列表中的每个元素是一个布尔数组，对应 MultiDiscrete 的一个维度。
+        """
+        masks = []
+        
+        # 1. 动作类型掩码 (维度=2)
+        # 0=增加节点 (禁用), 1=放置元件 (启用)
+        masks.append([False, True])
+        
+        # 2. 元件索引掩码 (维度=max_components)
+        # 只有库存中存在的元件才可用
+        # self.available_components: 1=可用, 0=已用
+        comp_mask = [bool(x) for x in self.available_components]
+        masks.append(comp_mask)
+        
+        # 3. 节点1 掩码 (维度=max_nodes)
+        # 只能连接已存在的节点 (0 到 node_counter-1)
+        # 或者如果是第一个元件，允许连接 0 (虽然此时 node_counter=0，但 _apply_action 会处理)
+        # 实际上，_apply_action 逻辑允许连接 "current_node_count" 来创建新节点。
+        # 所以有效范围是 0 到 node_counter (包含 node_counter 用于创建新节点)
+        # 但不能超过 max_nodes
+        
+        node_mask = [False] * self.max_nodes
+        
+        if self.node_counter == 0:
+            # 第一个元件，强制连接 0 和 1 (在 _apply_action 中处理)
+            # 这里我们只需允许 0 和 1 (或者任意，因为 _apply_action 会重写)
+            # 为了配合 _apply_action 的逻辑:
+            # "if self.circuit_graph.number_of_nodes() == 0: n1, n2 = 0, 1"
+            # 所以只要允许任何合法的索引即可。
+            node_mask[0] = True
+            if self.max_nodes > 1: node_mask[1] = True
+        else:
+            # 允许连接现有节点 [0, node_counter-1]
+            for i in range(self.node_counter):
+                node_mask[i] = True
+            
+            # 允许连接下一个新节点 (node_counter)，前提是没超过 max_nodes
+            if self.node_counter < self.max_nodes:
+                node_mask[self.node_counter] = True
+                
+        masks.append(node_mask)
+        
+        # 4. 节点2 掩码 (维度=max_nodes)
+        # 逻辑同节点1
+        masks.append(node_mask.copy()) # 使用相同的掩码
+        
+        # MaskablePPO 对于 MultiDiscrete 空间，期望返回一个展平的 1D 列表
+        # 即所有维度的掩码拼接在一起
+        flattened_mask = []
+        for m in masks:
+            flattened_mask.extend(m)
+            
+        return flattened_mask
 
     def render(self):
         pass

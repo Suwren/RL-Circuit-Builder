@@ -18,7 +18,8 @@ if os.name == 'nt':
             os.environ["PYSPICE_NGSPICE_LIBRARY_PATH"] = str(ngspice_path)
 
 # 配置 PySpice 日志级别
-logger = Logging.setup_logging()
+# 将日志级别设置为 CRITICAL 以屏蔽训练过程中的大量警告和错误
+logger = Logging.setup_logging(logging_level='CRITICAL')
 
 class CircuitSimulator:
     """

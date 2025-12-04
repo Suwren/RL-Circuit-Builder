@@ -155,32 +155,10 @@ def analyze_mode_characteristics(graph: nx.MultiGraph):
                 'inductor_trends': {}
             }
             
-        # --- 3. 检查短路 ---
-        # 检查流过电压源的电流是否过大
-        CURRENT_THRESHOLD = 1000.0 # 阈值: 1000A
-        
-        v_sources = []
-        for u, v, data in graph.edges(data=True):
-            if isinstance(data['component'], VoltageSource):
-                v_sources.append(data['component'])
-                
-        for v_src in v_sources:
-            branch_name = v_src.name.lower()
-            # PySpice 分支电流命名可能不同，尝试多种可能
-            keys_to_check = [branch_name, f"v{branch_name}", f"v_{branch_name}"]
-            
-            current = 0.0
-            found = False
-            for key in keys_to_check:
-                if key in analysis.branches:
-                    current = float(analysis.branches[key][0])
-                    found = True
-                    break
-            
-            if found:
-                if abs(current) > CURRENT_THRESHOLD:
-                    valid = False
-                    reasons.append(f"Short Circuit detected at {v_src.name} (I={current:.2f}A)")
+        # --- 3. 检查短路 (已移除) ---
+        # 我们现在完全依赖拓扑检查 (Loop must have Inductor) 来防止短路。
+        # SPICE 仿真仅用于趋势分析。
+        pass
     else:
         # 如果拓扑已经无效，跳过仿真
         analysis = None

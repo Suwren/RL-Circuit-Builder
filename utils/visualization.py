@@ -1,12 +1,13 @@
 import networkx as nx
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 import numpy as np
 
 def visualize_circuit(graph: nx.MultiGraph, title="Generated Circuit", filename=None):
     """
-    使用 matplotlib 可视化电路图，包含元件方向性。
+    使用 matplotlib 可视化电路图，包含元件方向性和详细图例。
     """
-    plt.figure(figsize=(12, 10))
+    plt.figure(figsize=(14, 10)) # 稍微加宽以容纳图例
     
     # 布局
     pos = nx.spring_layout(graph, seed=42, k=2.5)
@@ -21,6 +22,10 @@ def visualize_circuit(graph: nx.MultiGraph, title="Generated Circuit", filename=
     
     ax = plt.gca()
     
+    # 图例句柄
+    legend_handles = []
+    added_labels = set()
+    
     for u, v, data in graph.edges(data=True):
         comp = data.get('component')
         if not comp: continue
@@ -30,22 +35,36 @@ def visualize_circuit(graph: nx.MultiGraph, title="Generated Circuit", filename=
         # 确定颜色和标签
         color = 'black'
         label_text = comp.name
+        type_name = type(comp).__name__
         
         if "VoltageSource" in str(type(comp)):
             color = 'red'
-            label_text += "\n(+)" # 标记 n1 为正极
+            label_text += "\n(+)->(-)" 
+            legend_label = "Voltage Source (Arrow: + to -)"
         elif "Switch" in str(type(comp)):
             color = 'green'
-            # 假设 n1=Drain, n2=Source, 体二极管是 S->D (n2->n1)
-            # 所以我们标记体二极管方向
-            label_text += "\n(Body: <-)" 
+            # 假设 n1=Drain, n2=Source
+            # 箭头方向: n1 -> n2 (Drain -> Source)
+            # 体二极管方向: n2 -> n1 (Source -> Drain, 反向)
+            label_text += "\n(D->S)" 
+            legend_label = "Switch (Arrow: Drain->Source)\n(Body Diode: Source->Drain)"
         elif "Diode" in str(type(comp)):
             color = 'blue'
-            label_text += "\n(->)"
+            label_text += "\n(A->K)"
+            legend_label = "Diode (Arrow: Anode->Cathode)"
         elif "Inductor" in str(type(comp)):
             color = 'orange'
+            legend_label = "Inductor"
         elif "Capacitor" in str(type(comp)):
             color = 'purple'
+            legend_label = "Capacitor"
+        else:
+            legend_label = type_name
+            
+        # 添加图例 (去重)
+        if legend_label not in added_labels:
+            legend_handles.append(mpatches.Patch(color=color, label=legend_label))
+            added_labels.add(legend_label)
             
         # 计算平行边的偏移
         pair = tuple(sorted((n1, n2)))
@@ -85,8 +104,13 @@ def visualize_circuit(graph: nx.MultiGraph, title="Generated Circuit", filename=
     plt.title(title)
     plt.axis('off')
     
+    # 添加图例
+    if legend_handles:
+        plt.legend(handles=legend_handles, loc='upper left', bbox_to_anchor=(1, 1), title="Component Legend")
+        plt.tight_layout() # 调整布局以显示图例
+    
     if filename:
-        plt.savefig(filename)
+        plt.savefig(filename, bbox_inches='tight') # 确保图例被保存
         print(f"Circuit visualization saved to {filename}")
     else:
         plt.show()
