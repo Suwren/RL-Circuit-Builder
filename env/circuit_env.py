@@ -55,7 +55,11 @@ class CircuitEnv(gym.Env):
             "node_features": spaces.Box(low=-np.inf, high=np.inf, shape=(max_nodes, 2), dtype=np.float32),
         })
 
-        self.reset()
+        self.initial_actions = [] # 用于课程学习的初始动作序列
+
+    def set_initial_actions(self, actions):
+        """设置初始动作序列 (用于逆向课程学习)"""
+        self.initial_actions = actions
 
     def reset(self, seed=None, options=None):
         """
@@ -76,6 +80,24 @@ class CircuitEnv(gym.Env):
         
         # 重置库存状态 (1 = 可用)
         self.available_components = np.ones(self.max_components, dtype=np.int8)
+        
+        # --- 课程学习: 执行初始动作 ---
+        # 如果 options 中有 initial_actions，优先使用
+        initial_actions = self.initial_actions
+        if options and 'initial_actions' in options:
+            initial_actions = options['initial_actions']
+            
+        if initial_actions:
+            for action in initial_actions:
+                self.step_count += 1
+                self._apply_action(action)
+                # 注意: 这里我们不计算奖励，只更新状态
+                # 但需要更新 last_cycle_count 以便后续计算正确
+                try:
+                    current_cycles = nx.cycle_basis(self.circuit_graph.to_undirected())
+                    self.last_cycle_count = len(current_cycles)
+                except:
+                    self.last_cycle_count = 0
         
         observation = self._get_obs()
         info = {}
