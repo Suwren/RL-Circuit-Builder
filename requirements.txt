@@ -1,0 +1,4 @@
+gymnasium
+networkx
+numpy
+PySpice
