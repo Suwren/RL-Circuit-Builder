@@ -13,6 +13,11 @@ class CircuitEnv(gym.Env):
     
     该环境允许智能体通过放置元件来构建电路拓扑。
     目标是构建一个功能性的电源变换器（如 Buck 变换器）。
+    
+    **新动作逻辑 (Blank Canvas)**:
+    1. 初始为空白。
+    2. 第一个元件强制创建节点 0 和 1。
+    3. 后续元件必须至少有一个端点连接到现有节点。
     """
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 4}
 
@@ -22,7 +27,7 @@ class CircuitEnv(gym.Env):
         
         参数:
             initial_components: 可用元件的清单 (库存)。
-            max_nodes: 电路中允许的最大节点数。
+            max_nodes: 电路中允许的最大节点数 (用于观测空间的大小限制)。
         """
         super().__init__()
         self.max_nodes = max_nodes
@@ -32,11 +37,11 @@ class CircuitEnv(gym.Env):
         
         # 电路的图表示 (使用 NetworkX MultiGraph 支持多重边)
         self.circuit_graph = nx.MultiGraph()
-        self.node_counter = 1 
+        self.node_counter = 0 
         
         # 动作空间 (Action Space)
         # 格式: [动作类型, 元件索引, 节点1, 节点2]
-        # 动作类型: 0=增加节点 (已禁用), 1=放置元件
+        # 动作类型: 0=增加节点 (已禁用/保留兼容), 1=放置元件
         self.action_space = spaces.MultiDiscrete([2, self.max_components, max_nodes, max_nodes])
 
         # 观测空间 (Observation Space)
@@ -45,7 +50,7 @@ class CircuitEnv(gym.Env):
         # 2. inventory_mask: 库存掩码，表示哪些元件尚未使用 (1=可用, 0=已用)
         # 3. node_features: 节点特征 (预留，目前全零)
         self.observation_space = spaces.Dict({
-            "adjacency": spaces.Box(low=0, high=1, shape=(max_nodes, max_nodes), dtype=np.int8),
+            "adjacency": spaces.Box(low=0, high=9, shape=(max_nodes, max_nodes), dtype=np.int8),
             "inventory_mask": spaces.Box(low=0, high=1, shape=(self.max_components,), dtype=np.int8),
             "node_features": spaces.Box(low=-np.inf, high=np.inf, shape=(max_nodes, 2), dtype=np.float32),
         })
@@ -59,14 +64,8 @@ class CircuitEnv(gym.Env):
         super().reset(seed=seed)
         self.circuit_graph.clear()
         
-        # 添加接地节点 (GND)
-        self.circuit_graph.add_node(0, type="GND") 
-        self.node_counter = 1
-        
-        # 预先添加所有可能的中间节点，简化动作空间
-        for _ in range(self.max_nodes - 1):
-            self.circuit_graph.add_node(self.node_counter, type="Intermediate")
-            self.node_counter += 1
+        # 初始状态：无节点，无元件
+        self.node_counter = 0
             
         self.step_count = 0
         self.last_cycle_count = 0 # 初始化环路计数，用于奖励计算
@@ -119,13 +118,14 @@ class CircuitEnv(gym.Env):
     def _apply_action(self, action) -> bool:
         """
         应用动作到电路图中。
+        遵循"白纸"构建逻辑。
         返回动作是否有效。
         """
         # 解析动作: [类型, 元件索引, 节点1, 节点2]
         action_type = action[0]
         comp_idx = action[1]
-        n1 = action[2]
-        n2 = action[3]
+        raw_n1 = action[2]
+        raw_n2 = action[3]
         
         if action_type == 0: # 增加节点 (已禁用)
             return False
@@ -133,22 +133,83 @@ class CircuitEnv(gym.Env):
         elif action_type == 1: # 放置元件
             # 检查元件索引是否有效且库存中有剩余
             if comp_idx < self.max_components and self.available_components[comp_idx] == 1:
-                # 检查节点是否存在且不是同一个节点 (不能短接自身)
-                if self.circuit_graph.has_node(n1) and self.circuit_graph.has_node(n2) and n1 != n2:
-                    # 从初始库存获取元件模板
-                    comp_template = self.initial_inventory[comp_idx]
-                    # 创建元件副本
-                    comp_instance = deepcopy(comp_template)
-                    comp_instance.nodes = (n1, n2)
+                
+                # --- 逻辑分支 1: 放置第一个元件 ---
+                if self.circuit_graph.number_of_nodes() == 0:
+                    # 强制创建节点 0 和 1
+                    n1, n2 = 0, 1
+                    self.circuit_graph.add_node(n1, type="Intermediate")
+                    self.circuit_graph.add_node(n2, type="Intermediate")
+                    self.node_counter = 2
                     
-                    # 将元件作为边添加到图中
-                    self.circuit_graph.add_edge(n1, n2, component=comp_instance, inventory_idx=comp_idx)
+                    # 添加元件
+                    self._add_component_to_graph(comp_idx, n1, n2)
+                    return True
+                
+                # --- 逻辑分支 2: 放置后续元件 ---
+                else:
+                    current_node_count = self.node_counter
                     
-                    # 标记该元件为已使用
-                    self.available_components[comp_idx] = 0
+                    # 解释节点选择:
+                    # 如果 ID < current_node_count -> 现有节点
+                    # 如果 ID >= current_node_count -> 请求新节点
+                    
+                    # 确定实际的节点 ID
+                    # 如果请求新节点，我们暂时分配一个新的 ID (current_node_count)
+                    # 注意：如果两个都请求新节点，它们是同一个新节点吗？
+                    # 简化逻辑：如果 raw_n >= current，则视为"连接到一个新创建的节点"
+                    # 如果 raw_n1 和 raw_n2 都 >= current，则意味着连接两个新节点 -> 这在"后续元件"逻辑中是不允许的(孤岛)
+                    
+                    is_n1_new = raw_n1 >= current_node_count
+                    is_n2_new = raw_n2 >= current_node_count
+                    
+                    # 约束检查: 必须至少有一个连接到现有节点
+                    if is_n1_new and is_n2_new:
+                        return False # 试图创建孤岛
+                    
+                    # 确定最终的节点 ID
+                    final_n1 = raw_n1 if not is_n1_new else current_node_count
+                    # 如果 n1 是新的，n2 必须是旧的。如果 n2 也是新的(上面已拦截)，或者 n2 是旧的。
+                    # 如果 n1 是旧的，n2 可以是新的。如果 n2 是新的，它的 ID 应该是 current_node_count。
+                    # 此时如果 n1 也是新的(不可能，已拦截)。
+                    
+                    # 这里的逻辑有点微妙：如果 n1 和 n2 都是"新"的，我们拒绝。
+                    # 如果只有一个是新的，那个新的 ID 就是 current_node_count。
+                    # 如果两个都是旧的，直接用。
+                    
+                    if is_n2_new:
+                        final_n2 = current_node_count
+                    else:
+                        final_n2 = raw_n2
+                        
+                    # 再次检查不能连接同一个节点
+                    if final_n1 == final_n2:
+                        return False
+                    
+                    # 执行添加
+                    # 如果需要创建新节点
+                    if is_n1_new or is_n2_new:
+                        # 检查是否超过最大节点限制
+                        if self.node_counter >= self.max_nodes:
+                            return False
+                        
+                        self.circuit_graph.add_node(self.node_counter, type="Intermediate")
+                        self.node_counter += 1
+                        
+                    # 添加元件
+                    self._add_component_to_graph(comp_idx, final_n1, final_n2)
                     return True
         
         return False
+
+    def _add_component_to_graph(self, comp_idx, n1, n2):
+        """辅助函数：将元件添加到图中并更新库存"""
+        comp_template = self.initial_inventory[comp_idx]
+        comp_instance = deepcopy(comp_template)
+        comp_instance.nodes = (n1, n2)
+        
+        self.circuit_graph.add_edge(n1, n2, component=comp_instance, inventory_idx=comp_idx)
+        self.available_components[comp_idx] = 0
 
     def _calculate_reward(self, result, valid_action, action):
         """
@@ -167,14 +228,13 @@ class CircuitEnv(gym.Env):
         # --- 1. 过程奖励 (Step Rewards) ---
         
         if not valid_action:
-            return -0.5 # 无效动作给予微小惩罚
+            return -1.0 # 无效动作给予惩罚 (比之前稍微重一点，因为现在动作空间更受限)
             
         reward = 0.0
         
         # 检查是否形成了新环路
         try:
             # 获取当前的环路基 (Cycle Basis)
-            # 注意: cycle_basis 返回的是无向图的基础环列表
             current_cycles = nx.cycle_basis(self.circuit_graph.to_undirected())
             num_cycles = len(current_cycles)
         except:
@@ -226,12 +286,22 @@ class CircuitEnv(gym.Env):
         
         # 额外检查: 并联开关惩罚
         # 智能体不应在两点间并联多个开关
-        n1, n2 = action[2], action[3]
-        if self.circuit_graph.has_edge(n1, n2):
-            edges = self.circuit_graph.get_edge_data(n1, n2)
-            switch_count = sum(1 for k, d in edges.items() if isinstance(d['component'], Switch))
-            if switch_count > 1:
-                reward += R_MN # 严厉惩罚并联开关
+        # 注意：由于现在节点是动态生成的，并联开关的可能性变小了，但仍然存在
+        n1, n2 = 0, 0 # 这里需要获取实际连接的节点，但 _apply_action 内部处理了。
+        # 我们可以通过检查图来获取最近添加的边，或者简化这个检查。
+        # 简单起见，我们遍历全图检查是否有并联开关 (性能稍差但准确)
+        # 或者，由于我们知道动作意图，我们可以尝试推断。
+        # 这里为了准确性，我们暂时跳过针对"本步"的特定检查，而是依赖全局检查或后续优化。
+        # 实际上，如果两个节点间有多个开关，这在 cycle check 中可能不会直接体现，但在功能分析中会体现。
+        # 我们可以保留一个简单的检查：
+        for u, v, data in self.circuit_graph.edges(data=True):
+            if isinstance(data['component'], Switch):
+                # 检查该边是否有其他开关并联
+                edges = self.circuit_graph.get_edge_data(u, v)
+                switch_count = sum(1 for k, d in edges.items() if isinstance(d['component'], Switch))
+                if switch_count > 1:
+                    reward += R_MN
+                    break
         
         # --- 2. 终局奖励 (Terminal Rewards) ---
         # 当所有元件放置完毕时触发
@@ -260,9 +330,9 @@ class CircuitEnv(gym.Env):
             # 检查 2: 功能性验证 (伏秒平衡)
             from utils.mode_analysis import analyze_switching_modes
             
-            # 首先检查全图连通性
+            # 连通性检查 (现在由构建过程保证，但为了保险还是留着)
             if not nx.is_connected(self.circuit_graph.to_undirected()):
-                reward += R_MN # 不连通，无效
+                reward += R_MN 
                 return reward
                 
             # 调用模态分析工具
@@ -300,301 +370,21 @@ class CircuitEnv(gym.Env):
         生成当前的观测向量。
         """
         # 1. 邻接矩阵 (Adjacency Matrix)
+        # 现在存储元件类型 ID (0-8)
         adj = np.zeros((self.max_nodes, self.max_nodes), dtype=np.int8)
-        for u, v in self.circuit_graph.edges():
+        
+        for u, v, data in self.circuit_graph.edges(data=True):
             if u < self.max_nodes and v < self.max_nodes:
-                adj[u, v] = 1
-                adj[v, u] = 1
+                comp = data.get('component')
+                if comp:
+                    type_id = comp.get_type_id()
+                    adj[u, v] = type_id
+                    adj[v, u] = type_id
         
         return {
             "adjacency": adj,
             "inventory_mask": self.available_components.copy(),
             "node_features": np.zeros((self.max_nodes, 2), dtype=np.float32), # 预留
-        }
-
-    def render(self):
-        pass
-    metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 4}
-
-    def __init__(self, initial_components: List[Component], max_nodes: int = 20):
-        super().__init__()
-        self.max_nodes = max_nodes
-        # 深拷贝以确保环境拥有独立的元件列表
-        self.initial_inventory = deepcopy(initial_components)
-        self.max_components = len(initial_components)
-        
-        # 电路的图表示
-        self.circuit_graph = nx.MultiGraph()
-        self.node_counter = 1 
-        
-        # 动作空间 (Action Space)
-        # [类型, 元件索引, 节点1, 节点2]
-        # 类型: 0=增加节点, 1=放置元件
-        self.action_space = spaces.MultiDiscrete([2, self.max_components, max_nodes, max_nodes])
-
-        # 观测空间 (Observation Space)
-        # 我们需要表示:
-        # 1. 电路图 (邻接矩阵)
-        # 2. 库存状态 (哪些元件已被使用)
-        self.observation_space = spaces.Dict({
-            "adjacency": spaces.Box(low=0, high=1, shape=(max_nodes, max_nodes), dtype=np.int8),
-            "inventory_mask": spaces.Box(low=0, high=1, shape=(self.max_components,), dtype=np.int8), # 1=可用, 0=已用
-            "node_features": spaces.Box(low=-np.inf, high=np.inf, shape=(max_nodes, 2), dtype=np.float32),
-        })
-
-        self.reset()
-
-    def reset(self, seed=None, options=None):
-        super().reset(seed=seed)
-        self.circuit_graph.clear()
-        self.circuit_graph.add_node(0, type="GND") 
-        self.node_counter = 1
-        
-        # 预先添加所有节点以简化动作空间
-        for _ in range(self.max_nodes - 1):
-            self.circuit_graph.add_node(self.node_counter, type="Intermediate")
-            self.node_counter += 1
-            
-        self.step_count = 0
-        self.last_cycle_count = 0 # Initialize cycle count for reward calculation
-        self.max_steps = self.max_components * 3 # 允许一些额外的步骤
-        if self.max_steps < 10: self.max_steps = 10
-        
-        # 重置库存
-        # 我们跟踪初始列表中哪些元件当前在图中
-        # 为了简单起见，我们只保留一个布尔掩码
-        self.available_components = np.ones(self.max_components, dtype=np.int8)
-        
-        observation = self._get_obs()
-        info = {}
-        return observation, info
-
-    def step(self, action):
-        self.step_count += 1
-        
-        # 1. 执行动作
-        valid_action = self._apply_action(action)
-        
-        # 2. 仿真 (已移除实时仿真，改为终局分析)
-        simulation_result = None
-        
-        # 3. 计算奖励
-        reward = self._calculate_reward(simulation_result, valid_action, action)
-        
-        # 4. 检查终止条件
-        terminated = False
-        if np.sum(self.available_components) == 0:
-            terminated = True
-            
-        truncated = False
-        if self.step_count >= self.max_steps:
-            truncated = True
-            # 如果因步数限制而终止，且还有剩余元件，给予惩罚
-            if np.sum(self.available_components) > 0:
-                reward -= 10.0 # 未完成惩罚
-        
-        # 5. 获取观测
-        observation = self._get_obs()
-        info = {}
-        
-        return observation, reward, terminated, truncated, info
-
-    def _apply_action(self, action) -> bool:
-        # 动作现在是一个数组: [类型, 元件索引, 节点1, 节点2]
-        action_type = action[0]
-        comp_idx = action[1]
-        n1 = action[2]
-        n2 = action[3]
-        
-        if action_type == 0: # 增加节点
-            # 已禁用: 节点已预先添加
-            return False
-                
-        elif action_type == 1: # 放置元件
-            # 检查元件是否可用
-            if comp_idx < self.max_components and self.available_components[comp_idx] == 1:
-                # 检查节点是否存在且不同
-                if self.circuit_graph.has_node(n1) and self.circuit_graph.has_node(n2) and n1 != n2:
-                    # 从初始库存获取元件模板
-                    comp_template = self.initial_inventory[comp_idx]
-                    # 创建副本/实例
-                    comp_instance = deepcopy(comp_template)
-                    comp_instance.nodes = (n1, n2)
-                    
-                    # 添加到图
-                    self.circuit_graph.add_edge(n1, n2, component=comp_instance, inventory_idx=comp_idx)
-                    
-                    # 标记为已使用
-                    self.available_components[comp_idx] = 0
-                    return True
-        
-        return False
-
-    def _calculate_reward(self, result, valid_action, action):
-        # 论文奖励参数
-        R_SN = -1.0   # Small Negative (No new loop)
-        R_MN = -10.0  # Medium Negative (Invalid loop)
-        R_BN = -20.0  # Big Negative (Timeout/Redundant - handled elsewhere)
-        R_SP = +2.0   # Small Positive (Valid new loop)
-        R_MP = +10.0  # Medium Positive (All sources in loops)
-        R_BP = +100.0 # Big Positive (Volt-Second Balance / Functional)
-        
-        # 动作: [类型, 元件索引, 节点1, 节点2]
-        action_type = action[0]
-
-        # 1. 过程奖励 (Step Rewards)
-        if not valid_action:
-            return -0.5 # 无效动作微小惩罚
-            
-        reward = 0.0
-        
-        # 检查是否形成了新环路
-        try:
-            # 使用 simple_cycles 对于有向图，但我们是无向图 (电气连接)
-            # cycle_basis 返回基础环
-            current_cycles = nx.cycle_basis(self.circuit_graph.to_undirected())
-            num_cycles = len(current_cycles)
-        except:
-            num_cycles = 0
-            current_cycles = []
-            
-        if num_cycles > self.last_cycle_count:
-            # 发现了新环路
-            # 检查新环路的性质 (简化：检查所有环路，如果有坏环路则惩罚)
-            # 理想情况下应该只检查新生成的，但 cycle_basis 顺序不确定。
-            # 我们检查是否存在"坏环路"。
-            
-            has_bad_loop = False
-            
-            for cycle_nodes in current_cycles:
-                # 获取环路中的元件
-                loop_components = []
-                # 遍历环路节点对 (u, v)
-                for i in range(len(cycle_nodes)):
-                    u = cycle_nodes[i]
-                    v = cycle_nodes[(i + 1) % len(cycle_nodes)]
-                    # 获取 u, v 之间的边数据
-                    if self.circuit_graph.has_edge(u, v):
-                        # 可能有多条边，我们只取第一条 (简化)
-                        # 严格来说应该检查所有路径组合，但这里假设 cycle_basis 对应物理路径
-                        edges = self.circuit_graph.get_edge_data(u, v)
-                        for key, data in edges.items():
-                            loop_components.append(data['component'])
-                            break # 只取一个
-                            
-                # 规则 2a: 环路中必须包含电感 L (防止短路)
-                has_inductor = any(isinstance(c, Inductor) for c in loop_components)
-                
-                # 规则 2b: 环路中必须包含开关 S 或二极管 D (可控性)
-                has_switch_or_diode = any(isinstance(c, (Switch, Diode)) for c in loop_components)
-                
-                if not has_inductor:
-                    # 不包含电感 -> 潜在短路风险 (如 Vin-S-GND)
-                    # 除非是纯电阻回路 (但我们没有纯电阻负载，只有 Vout)
-                    # Vout 也是电压源，所以 Vin-Vout 也是短路
-                    has_bad_loop = True
-                    # print("Penalty: Loop without Inductor detected")
-                    
-                if not has_switch_or_diode:
-                    # 不包含开关 -> 不可控 (如 Vin-L-Vout 直接导通)
-                    has_bad_loop = True
-                    # print("Penalty: Uncontrollable Loop detected")
-            
-            if has_bad_loop:
-                reward += R_MN
-            else:
-                reward += R_SP
-                
-        else:
-            # 没有发现新环路
-            reward += R_SN
-            
-        self.last_cycle_count = num_cycles
-        
-        # 检查并联开关 (保留此规则，虽然论文没明确说，但属于"冗余"范畴)
-        n1, n2 = action[2], action[3]
-        if self.circuit_graph.has_edge(n1, n2):
-            edges = self.circuit_graph.get_edge_data(n1, n2)
-            switch_count = sum(1 for k, d in edges.items() if isinstance(d['component'], Switch))
-            if switch_count > 1:
-                reward += R_MN # 使用中等惩罚
-        
-        # 检查库存是否为空 (终止状态)
-        if np.sum(self.available_components) == 0:
-            # 终局奖励
-            
-            # 1. 检查所有电压源是否都在环路中 (R_MP)
-            # 简单检查：电压源所在的边是否属于某个 cycle
-            # cycle_basis 返回节点列表。
-            all_sources_in_loops = True
-            sources = [d['component'] for u, v, d in self.circuit_graph.edges(data=True) if isinstance(d['component'], VoltageSource)]
-            
-            # 构建所有环路的边集合
-            cycle_edges = set()
-            for cycle in current_cycles:
-                for i in range(len(cycle)):
-                    u, v = cycle[i], cycle[(i + 1) % len(cycle)]
-                    cycle_edges.add(tuple(sorted((u, v))))
-            
-            for src in sources:
-                u, v = src.nodes
-                if tuple(sorted((u, v))) not in cycle_edges:
-                    all_sources_in_loops = False
-                    break
-            
-            if all_sources_in_loops and len(sources) > 0:
-                reward += R_MP
-            
-            # 2. 功能性检查 (R_BP - 伏秒平衡/可运行)
-            from utils.mode_analysis import analyze_switching_modes
-            
-            # 首先检查连通性
-            if not nx.is_connected(self.circuit_graph.to_undirected()):
-                reward += R_MN # 不连通视为不可控/无效
-                return reward
-                
-            # 分析模态
-            modes = analyze_switching_modes(self.circuit_graph)
-            
-            has_short = False
-            has_increasing = False
-            has_decreasing = False
-            
-            for state, data in modes.items():
-                if not data['valid']:
-                    has_short = True
-                
-                if data['valid']:
-                    trends = data['inductor_trends']
-                    for comp_name, trend in trends.items():
-                        if "Increasing" in trend: has_increasing = True
-                        if "Decreasing" in trend: has_decreasing = True
-            
-            if has_short:
-                # 严重故障
-                reward += R_MN # 或者更重
-            elif has_increasing and has_decreasing:
-                # 满足伏秒平衡条件 (既能增磁也能消磁)
-                reward += R_BP
-            else:
-                # 不满足
-                reward += R_MN
-                
-        return reward
-
-    def _get_obs(self):
-        # 构建邻接矩阵
-        adj = np.zeros((self.max_nodes, self.max_nodes), dtype=np.int8)
-        
-        for u, v in self.circuit_graph.edges():
-            if u < self.max_nodes and v < self.max_nodes:
-                adj[u, v] = 1
-                adj[v, u] = 1
-        
-        return {
-            "adjacency": adj,
-            "inventory_mask": self.available_components.copy(),
-            "node_features": np.zeros((self.max_nodes, 2), dtype=np.float32),
         }
 
     def render(self):

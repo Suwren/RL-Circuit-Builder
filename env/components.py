@@ -15,6 +15,31 @@ class Component:
     nodes: Tuple[int, int]
     value: float = 0.0
 
+    def get_type_id(self) -> int:
+        """
+        返回元件的类型 ID，用于观测空间构建。
+        0: None/Unknown
+        1: Wire
+        2: Resistor
+        3: Inductor
+        4: Capacitor
+        5: VoltageSource
+        6: CurrentSource
+        7: Switch
+        8: Diode
+        """
+        # 由于 Python 的导入机制，这里使用类名判断以避免循环导入或未定义问题
+        c_name = self.__class__.__name__
+        if c_name == "Wire": return 1
+        if c_name == "Resistor": return 2
+        if c_name == "Inductor": return 3
+        if c_name == "Capacitor": return 4
+        if c_name == "VoltageSource": return 5
+        if c_name == "CurrentSource": return 6
+        if c_name == "Switch": return 7
+        if c_name == "Diode": return 8
+        return 0
+
 @dataclass
 class Inductor(Component):
     """
