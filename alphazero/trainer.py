@@ -8,6 +8,10 @@ from torch.utils.data import DataLoader, TensorDataset
 from collections import deque
 import random
 import time
+import warnings
+
+# Suppress DirectML performance warnings
+warnings.filterwarnings("ignore", message="The operator 'aten::native_group_norm_backward' is not currently supported")
 
 # Add project root to path to ensure imports work correctly
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -17,6 +21,7 @@ from env.components import VoltageSource, Switch, Inductor
 from alphazero.model import AlphaZeroNet
 from alphazero.mcts import MCTS
 from alphazero.circuit_wrapper import CircuitEnvWrapper
+from utils.device_helper import get_device
 
 class AlphaZeroTrainer:
     """
@@ -26,11 +31,11 @@ class AlphaZeroTrainer:
     def __init__(self, num_sources=2, num_inductors=1, max_nodes=12):
         # 1. Configuration Parameters
         self.max_nodes = max_nodes
-        self.num_simulations = 100  # Balanced search depth (User Request)
+        self.num_simulations = 300  # Balanced search depth (User Request)
         self.batch_size = 64
         self.epochs = 20 # Increased from 10 to learn more from limited data
         self.lr = 1e-3
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = get_device()
         
         # 2. Initialize Environment and Inventory
         # We create a dynamic inventory based on the requested components
@@ -73,8 +78,8 @@ class AlphaZeroTrainer:
         # 2. Inductors
         inventory.append(Inductor(name="L1", nodes=(0, 0), value=47e-6))
         
-        # 3. Switches (4 Switches)
-        for i in range(4):
+        # 3. Switches (5 Switches)
+        for i in range(5):
             inventory.append(Switch(name=f"S{i+1}", nodes=(0, 0)))
             
         return inventory

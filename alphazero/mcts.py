@@ -1,13 +1,14 @@
 import math
 import numpy as np
 import torch
+from utils.device_helper import get_device
 
 class MCTS:
     """
     Monte Carlo Tree Search (MCTS) engine.
     Uses a neural network to guide the search (AlphaZero style).
     """
-    def __init__(self, model, cpuct=1.0, num_simulations=800, device="cpu"):
+    def __init__(self, model, cpuct=1.0, num_simulations=800, device="auto"):
         """
         Args:
             model: Neural network for policy and value prediction.
@@ -18,7 +19,7 @@ class MCTS:
         self.model = model
         self.cpuct = cpuct
         self.num_simulations = num_simulations
-        self.device = device
+        self.device = get_device(device)
         
         # Tree Statistics
         # Key: Canonical state string

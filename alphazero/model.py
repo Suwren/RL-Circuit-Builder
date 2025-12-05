@@ -24,7 +24,7 @@ class AlphaZeroNet(nn.Module):
         # 1. Convolutional Backbone
         self.conv_input = nn.Sequential(
             nn.Conv2d(input_shape[0], num_filters, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(num_filters),
+            nn.GroupNorm(1, num_filters), # Replaced InstanceNorm with LayerNorm (GroupNorm(1)) for DirectML stability
             nn.ReLU()
         )
         
@@ -37,7 +37,7 @@ class AlphaZeroNet(nn.Module):
         # Outputs logits for action probabilities P(a|s)
         self.policy_head = nn.Sequential(
             nn.Conv2d(num_filters, 2, kernel_size=1, stride=1),
-            nn.BatchNorm2d(2),
+            nn.GroupNorm(1, 2), # LayerNorm
             nn.ReLU(),
             nn.Flatten(),
             nn.Linear(2 * input_shape[1] * input_shape[2], num_actions)
@@ -47,7 +47,7 @@ class AlphaZeroNet(nn.Module):
         # Outputs scalar value V(s) in range [-1, 1]
         self.value_head = nn.Sequential(
             nn.Conv2d(num_filters, 1, kernel_size=1, stride=1),
-            nn.BatchNorm2d(1),
+            nn.GroupNorm(1, 1), # LayerNorm
             nn.ReLU(),
             nn.Flatten(),
             nn.Linear(1 * input_shape[1] * input_shape[2], 64),
@@ -74,9 +74,9 @@ class ResidualBlock(nn.Module):
     def __init__(self, num_filters):
         super(ResidualBlock, self).__init__()
         self.conv1 = nn.Conv2d(num_filters, num_filters, kernel_size=3, stride=1, padding=1)
-        self.bn1 = nn.BatchNorm2d(num_filters)
+        self.bn1 = nn.GroupNorm(1, num_filters) # Replaced InstanceNorm with LayerNorm
         self.conv2 = nn.Conv2d(num_filters, num_filters, kernel_size=3, stride=1, padding=1)
-        self.bn2 = nn.BatchNorm2d(num_filters)
+        self.bn2 = nn.GroupNorm(1, num_filters) # Replaced InstanceNorm with LayerNorm
         
     def forward(self, x):
         residual = x
