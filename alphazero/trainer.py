@@ -1,0 +1,252 @@
+import os
+import sys
+import numpy as np
+import torch
+import torch.optim as optim
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, TensorDataset
+from collections import deque
+import random
+import time
+
+# Add project root to path to ensure imports work correctly
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from env.circuit_env import CircuitEnv
+from env.components import VoltageSource, Switch, Inductor
+from alphazero.model import AlphaZeroNet
+from alphazero.mcts import MCTS
+from alphazero.circuit_wrapper import CircuitEnvWrapper
+
+class AlphaZeroTrainer:
+    """
+    Trainer class for the AlphaZero agent.
+    Manages the self-play loop, data collection, and neural network training.
+    """
+    def __init__(self, num_sources=2, num_inductors=1, max_nodes=12):
+        # 1. Configuration Parameters
+        self.max_nodes = max_nodes
+        self.num_simulations = 100  # Balanced search depth (User Request)
+        self.batch_size = 64
+        self.epochs = 20 # Increased from 10 to learn more from limited data
+        self.lr = 1e-3
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # 2. Initialize Environment and Inventory
+        # We create a dynamic inventory based on the requested components
+        self.inventory = self._create_inventory(num_sources, num_inductors)
+        self.raw_env = CircuitEnv(initial_components=self.inventory, max_nodes=self.max_nodes)
+        self.env = CircuitEnvWrapper(self.raw_env)
+        
+        # 3. Initialize Neural Network and MCTS
+        # Input channels: 9 (Component Types) + Inventory Mask + 4 (Node Features)
+        input_channels = 9 + len(self.inventory) + 4
+        self.model = AlphaZeroNet(input_shape=(input_channels, self.max_nodes, self.max_nodes), 
+                                  num_actions=self.env.action_space_size()).to(self.device)
+        
+        self.optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
+
+        self.mcts = MCTS(self.model, cpuct=1.0, num_simulations=self.num_simulations, device=self.device)
+        
+        # Replay Buffer to store self-play examples
+        # Reduced size to keep data fresh and learn from recent high-reward episodes
+        self.replay_buffer = deque(maxlen=1000)
+
+    def _create_inventory(self, num_sources=None, num_inductors=None):
+        """
+        Creates the component inventory.
+        Updated for Multi-Port Expansion:
+        - 3 Voltage Sources (20V, 10V, 5V)
+        - 1 Inductor
+        - 6 Switches
+        """
+        inventory = []
+        
+        # 1. Voltage Sources
+        # V1 = 20V
+        inventory.append(VoltageSource(name="V1", nodes=(0, 0), value=20.0, dc_value=20.0))
+        # V2 = 10V
+        inventory.append(VoltageSource(name="V2", nodes=(0, 0), value=10.0, dc_value=10.0))
+        # V3 = 5V
+        inventory.append(VoltageSource(name="V3", nodes=(0, 0), value=5.0, dc_value=5.0))
+        
+        # 2. Inductors
+        inventory.append(Inductor(name="L1", nodes=(0, 0), value=47e-6))
+        
+        # 3. Switches (4 Switches)
+        for i in range(4):
+            inventory.append(Switch(name=f"S{i+1}", nodes=(0, 0)))
+            
+        return inventory
+
+    def self_play(self):
+        """
+        Executes one episode of self-play.
+        Returns a list of training examples: [(observation, policy, value), ...]
+        """
+        self.mcts.clear() # Reset MCTS tree for the new episode
+        self.env = CircuitEnvWrapper(CircuitEnv(self.inventory, self.max_nodes)) # Reset environment
+        examples = []
+        
+        step = 0
+        while True:
+            step += 1
+            
+            # Debug: Verify clone consistency to ensure MCTS works correctly
+            s_orig = self.env.canonical_string()
+            s_clone = self.env.clone().canonical_string()
+            if s_orig != s_clone:
+                print(f"FATAL: Clone Mismatch at step {step}!")
+                print(f"Orig: {s_orig}")
+                print(f"Clone: {s_clone}")
+                raise RuntimeError("Clone Mismatch")
+
+            # Temperature control: High exploration (temp=1) early on, then greedy (temp -> 0)
+            temp = 1.0 if step < 10 else 0.1
+            pi = self.mcts.get_action_prob(self.env, temp=temp)
+            
+            # Store observation and policy. Value (z) will be filled after the episode ends.
+            obs_tensor = self.env.get_obs_tensor().numpy()
+            examples.append([obs_tensor, pi, None])
+            
+            # Choose action based on the policy distribution
+            action = np.random.choice(len(pi), p=pi)
+            
+            # Execute action in the environment
+            reward = self.env.step_flat(action)
+            
+            # Check for termination
+            terminated, final_score = self.env.is_terminal()
+            
+            if terminated:
+                # Episode finished. Backpropagate the final score as the value for all steps.
+                # Note: This treats the problem as a single-player optimization task.
+                return [(x[0], x[1], final_score) for x in examples]
+
+    def train(self, num_iterations=10, episodes_per_iter=5):
+        """
+        Main training loop.
+        """
+        print(f"Starting AlphaZero training on {self.device}...")
+        
+        for i in range(num_iterations):
+            print(f"\n=== Iteration {i+1}/{num_iterations} ===")
+            
+            # 1. Self-Play: Collect new data
+            print("Self-playing...")
+            new_examples = []
+            from tqdm import tqdm
+            for e in tqdm(range(episodes_per_iter), desc="Episodes"):
+                start_time = time.time()
+                episode_data = self.self_play()
+                new_examples.extend(episode_data)
+                duration = time.time() - start_time
+                tqdm.write(f"  Episode {e+1}: {len(episode_data)} steps, Reward={episode_data[0][2]:.4f}, Time={duration:.1f}s")
+                
+            self.replay_buffer.extend(new_examples)
+            print(f"Buffer size: {len(self.replay_buffer)}")
+            
+            # Check and save the best circuit found in this iteration
+            last_score = new_examples[-1][2]
+            if last_score > 0.5: # Save if score is decent (normalized > 0.5 means raw > 100)
+                 self.save_best_circuit(self.env, last_score, i+1)
+            
+            # 2. Training: Update Neural Network
+            print("Training network...")
+            self.train_network()
+            
+            # 3. Save Model Checkpoint
+            torch.save(self.model.state_dict(), f"models/alphazero_iter_{i+1}.pth")
+            
+            # 4. Periodic Evaluation (Deterministic)
+            print("Evaluating model (Deterministic)...")
+            self.evaluate_model(i+1)
+
+    def evaluate_model(self, iteration):
+        """
+        Runs a single deterministic episode to evaluate model progress.
+        Uses temp=0 to select the best moves.
+        """
+        self.mcts.clear()
+        self.env = CircuitEnvWrapper(CircuitEnv(self.inventory, self.max_nodes))
+        
+        step = 0
+        done = False
+        print(f"  [Eval] Start Generation...")
+        
+        while not done:
+            step += 1
+            # Use temp=0 for deterministic (greedy) action selection
+            pi = self.mcts.get_action_prob(self.env, temp=0)
+            action = np.argmax(pi)
+            
+            # Execute
+            self.env.step_flat(action)
+            terminated, score = self.env.is_terminal()
+            
+            if terminated:
+                done = True
+                print(f"  [Eval] Iter {iteration}: Steps={step}, Final Score={score:.4f}")
+                
+                # If good result, save plot
+                if score > 0.5:
+                    self.save_best_circuit(self.env, score, f"{iteration}_eval")
+
+
+    def save_best_circuit(self, env, score, iteration):
+        """Saves the plot of the best circuit found so far."""
+        from utils.visualization import plot_circuit
+        filename = f"best_circuit_iter_{iteration}.png"
+        print(f"  Saving best circuit with score {score:.4f} to {filename}")
+        plot_circuit(env.env.circuit_graph, filename=filename)
+
+    def train_network(self):
+        """
+        Trains the neural network using the replay buffer.
+        Minimizes the combined loss: (z - v)^2 - pi^T * log(p) + c||theta||^2
+        """
+        if len(self.replay_buffer) < self.batch_size:
+            return
+            
+        examples = list(self.replay_buffer)
+        random.shuffle(examples)
+        
+        # Prepare batches
+        obs_batch = torch.FloatTensor(np.array([x[0] for x in examples])).to(self.device)
+        pi_batch = torch.FloatTensor(np.array([x[1] for x in examples])).to(self.device)
+        v_batch = torch.FloatTensor(np.array([x[2] for x in examples])).to(self.device)
+        
+        dataset = TensorDataset(obs_batch, pi_batch, v_batch)
+        dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
+        
+        self.model.train()
+        total_loss = 0
+        
+        for epoch in range(self.epochs):
+            epoch_loss = 0
+            for obs, target_pi, target_v in dataloader:
+                pred_pi_logits, pred_v = self.model(obs)
+                
+                # Value Loss (MSE): (z - v)^2
+                loss_v = F.mse_loss(pred_v.view(-1), target_v)
+                
+                # Policy Loss (Cross Entropy): -pi * log(p)
+                log_probs = F.log_softmax(pred_pi_logits, dim=1)
+                loss_pi = -torch.sum(target_pi * log_probs) / target_pi.size(0)
+                
+                loss = loss_v + loss_pi
+                
+                self.optimizer.zero_grad()
+                loss.backward()
+                self.optimizer.step()
+                
+                epoch_loss += loss.item()
+            
+            total_loss += epoch_loss
+            
+        print(f"  Avg Loss: {total_loss / self.epochs:.4f}")
+
+if __name__ == "__main__":
+    # Hyperparameters: 50 iterations, 20 episodes per iteration = 1000 total episodes.
+    trainer = AlphaZeroTrainer()
+    trainer.train(num_iterations=50, episodes_per_iter=20)
