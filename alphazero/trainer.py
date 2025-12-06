@@ -107,7 +107,7 @@ class AlphaZeroTrainer:
                 raise RuntimeError("Clone Mismatch")
 
             # Temperature control: High exploration (temp=1) early on, then greedy (temp -> 0)
-            temp = 0.3 if step < 4 else 0
+            temp = 1 if step < 5 else 0.2
             pi = self.mcts.get_action_prob(self.env, temp=temp)
             
             # Store observation and policy. Value (z) will be filled after the episode ends.
