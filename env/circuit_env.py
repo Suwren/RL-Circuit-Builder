@@ -35,7 +35,9 @@ class CircuitEnv(gym.Env):
         # Observation Space
         self.observation_space = spaces.Dict({
             "adjacency": spaces.Box(low=0, high=9, shape=(max_nodes, max_nodes), dtype=np.int8),
-            "inventory_mask": spaces.Box(low=0, high=1, shape=(self.max_components,), dtype=np.int8),
+            # Optimized Inventory: [Count_V, Count_L, Count_S]
+            # Max possible count is max_components
+            "inventory_counts": spaces.Box(low=0, high=self.max_components, shape=(3,), dtype=np.float32),
             "node_features": spaces.Box(low=-np.inf, high=np.inf, shape=(max_nodes, 2), dtype=np.float32),
         })
 
@@ -406,9 +408,19 @@ class CircuitEnv(gym.Env):
             if u < self.max_nodes and v < self.max_nodes:
                 comp = data.get('component')
                 if comp:
-                    type_id = comp.get_type_id()
-                    adj[u, v] = type_id
-                    adj[v, u] = type_id
+                    type_id = comp.get_type_id() # 1=V, 2=L, 3=S, 0=Others
+                    
+                    if type_id > 0:
+                        # Directional Encoding:
+                        # adj[n1, n2] = Forward Type (1, 2, 3)
+                        # adj[n2, n1] = Reverse Type (4, 5, 6)
+                        
+                        n1, n2 = comp.nodes
+                        
+                        # Ensure we don't go out of bounds (though graph nodes should be valid)
+                        if n1 < self.max_nodes and n2 < self.max_nodes:
+                            adj[n1, n2] = type_id
+                            adj[n2, n1] = type_id + 3
         
         node_feats = np.zeros((self.max_nodes, 2), dtype=np.float32)
         
@@ -417,9 +429,24 @@ class CircuitEnv(gym.Env):
             node_feats[node, 0] = float(degree)
             node_feats[node, 1] = 1.0 if degree > 0 else 0.0
             
+        # Inventory Counts: [Count Voltage, Count Inductor, Count Switch]
+        # 用户要求：库存剩余信息矩阵中被广播的单一数值从比例改为剩余个数
+        # User Requirement: Use absolute counts instead of normalized ratios
+        total_v = 0
+        total_l = 0
+        total_s = 0
+        
+        for i, comp in enumerate(self.initial_inventory):
+            if self.available_components[i] == 1:
+                if isinstance(comp, VoltageSource): total_v += 1
+                elif isinstance(comp, Inductor): total_l += 1
+                elif isinstance(comp, Switch): total_s += 1
+        
+        inv_counts = np.array([total_v, total_l, total_s], dtype=np.float32)
+
         return {
             "adjacency": adj,
-            "inventory_mask": self.available_components.copy(),
+            "inventory_counts": inv_counts,
             "node_features": node_feats,
         }
 

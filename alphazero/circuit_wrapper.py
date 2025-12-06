@@ -48,11 +48,11 @@ class CircuitEnvWrapper:
     def canonical_string(self):
         """
         Generates a unique string representation of the state for MCTS hashing.
-        Combines Adjacency Matrix, Inventory Mask, and Step Count.
+        Combines Adjacency Matrix, Inventory Counts, and Step Count.
         """
         obs = self.env._get_obs()
         adj = obs['adjacency']
-        inv = obs['inventory_mask']
+        inv = obs['inventory_counts'] # Updated
         
         state_bytes = adj.tobytes() + inv.tobytes() + str(self.env.step_count).encode()
         return hashlib.md5(state_bytes).hexdigest()
@@ -132,23 +132,35 @@ class CircuitEnvWrapper:
         """
         Converts the observation dictionary into a PyTorch tensor.
         Output Shape: (Channels, Height, Width)
+        Updated to use 3 Inventory Channels (V, L, S counts).
         """
         obs = self.env._get_obs()
         adj = obs['adjacency']
-        inv = obs['inventory_mask']
+        inv_counts = obs['inventory_counts'] # Shape (3,)
         
-        num_types = 9
+        inv_counts = obs['inventory_counts'] # Shape (3,)
+        
         N = self.max_nodes
+
+        # 1. One-Hot Adjacency Matrix (Directional)
+        # Values in adj:
+        # 0: Empty/Other
+        # 1: V (Fwd), 2: L (Fwd), 3: S (Fwd)
+        # 4: V (Rev), 5: L (Rev), 6: S (Rev)
+        # We create 6 channels (indices 0-5 corresponding to values 1-6)
+        num_adj_channels = 6
+        adj_onehot = np.zeros((num_adj_channels, N, N), dtype=np.float32)
         
-        # 1. One-Hot Adjacency Matrix
-        adj_onehot = np.zeros((num_types, N, N), dtype=np.float32)
-        for t in range(num_types):
-            adj_onehot[t] = (adj == t).astype(np.float32)
+        for i in range(num_adj_channels):
+            val = i + 1 # Target value: 1, 2, ..., 6
+            adj_onehot[i] = (adj == val).astype(np.float32)
             
-        # 2. Inventory Mask (Broadcasted)
-        inv_channels = np.zeros((self.max_components, N, N), dtype=np.float32)
-        for i in range(self.max_components):
-            inv_channels[i, :, :] = inv[i]
+        # 2. Inventory Channels (3 Channels: V, L, S)
+        # Broadcast the scalar count to the entire HxW image
+        inv_channels = np.zeros((3, N, N), dtype=np.float32)
+        inv_channels[0, :, :] = inv_counts[0] # Voltage Count
+        inv_channels[1, :, :] = inv_counts[1] # Inductor Count
+        inv_channels[2, :, :] = inv_counts[2] # Switch Count
             
         # 3. Node Features (Broadcasted)
         node_feats = obs['node_features']
@@ -163,6 +175,7 @@ class CircuitEnvWrapper:
             node_feat_channels[2*f+1] = feat_col.reshape(1, -1)
             
         # Concatenate all channels
+        # Total: 9 + 3 + 4 = 16 channels
         feature_map = np.concatenate([adj_onehot, inv_channels, node_feat_channels], axis=0)
         
         return torch.FloatTensor(feature_map)

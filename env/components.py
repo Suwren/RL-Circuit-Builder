@@ -16,14 +16,14 @@ class Component:
         Used for constructing the observation tensor.
         """
         c_name = self.__class__.__name__
-        if c_name == "Wire": return 1
-        if c_name == "Resistor": return 2
-        if c_name == "Inductor": return 3
-        if c_name == "Capacitor": return 4
-        if c_name == "VoltageSource": return 5
-        if c_name == "CurrentSource": return 6
-        if c_name == "Switch": return 7
-        if c_name == "Diode": return 8
+        # Simplified Type IDs for Reduced Adjacency Matrix
+        # 1: VoltageSource
+        # 2: Inductor
+        # 3: Switch
+        # 0: Others (Wire, Capacitor, Resistor, Diode, CurrentSource) - Treated as empty/irrelevant for this specific input model
+        if c_name == "VoltageSource": return 1
+        if c_name == "Inductor": return 2
+        if c_name == "Switch": return 3
         return 0
 
 @dataclass

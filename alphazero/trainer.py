@@ -44,8 +44,8 @@ class AlphaZeroTrainer:
         self.env = CircuitEnvWrapper(self.raw_env)
         
         # 3. Initialize Neural Network and MCTS
-        # Input channels: 9 (Component Types) + Inventory Mask + 4 (Node Features)
-        input_channels = 9 + len(self.inventory) + 4
+        # Input channels: 6 (Directional Adjacency) + 3 (Inventory Counts) + 4 (Node Features) = 13
+        input_channels = 13
         self.model = AlphaZeroNet(input_shape=(input_channels, self.max_nodes, self.max_nodes), 
                                   num_actions=self.env.action_space_size()).to(self.device)
         
@@ -107,7 +107,7 @@ class AlphaZeroTrainer:
                 raise RuntimeError("Clone Mismatch")
 
             # Temperature control: High exploration (temp=1) early on, then greedy (temp -> 0)
-            temp = 1.0 if step < 10 else 0.1
+            temp = 0.3 if step < 4 else 0
             pi = self.mcts.get_action_prob(self.env, temp=temp)
             
             # Store observation and policy. Value (z) will be filled after the episode ends.
@@ -152,8 +152,10 @@ class AlphaZeroTrainer:
             print(f"Buffer size: {len(self.replay_buffer)}")
             
             # Check and save the best circuit found in this iteration
+            # Check and save the best circuit found in this iteration
             last_score = new_examples[-1][2]
-            if last_score > 0.5: # Save if score is decent (normalized > 0.5 means raw > 100)
+            # User Request: Save if Reward > 0.6
+            if last_score > 0.6: 
                  self.save_best_circuit(self.env, last_score, i+1)
             
             # 2. Training: Update Neural Network
@@ -194,7 +196,8 @@ class AlphaZeroTrainer:
                 print(f"  [Eval] Iter {iteration}: Steps={step}, Final Score={score:.4f}")
                 
                 # If good result, save plot
-                if score > 0.5:
+                # User Request: Save if Reward > 0.6
+                if score > 0.6:
                     self.save_best_circuit(self.env, score, f"{iteration}_eval")
 
 

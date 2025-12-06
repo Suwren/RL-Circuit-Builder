@@ -43,8 +43,8 @@ def evaluate_trained_model(model_path="models/alphazero_iter_41.pth"):
     env = CircuitEnvWrapper(raw_env)
     
     # 2. Load Model
-    # Input channels: 9 (adj) + len(inventory) + 4 (node feats) = 9 + 5 + 4 = 18
-    input_channels = 9 + len(inventory) + 4 
+    # Input channels: 9 (Adjacency) + 3 (Inventory Counts) + 4 (Node Features) = 16
+    input_channels = 16 
     model = AlphaZeroNet(input_shape=(input_channels, max_nodes, max_nodes), 
                               num_actions=env.action_space_size()).to(device)
     
