@@ -458,14 +458,10 @@ class CircuitEnv(gym.Env):
         masks = []
         
         # 1. Action Type (Stop/Place)
-        # 用户要求：智能体至少在第 6 步才可以选择完成拓扑/停止生成
-        # User Requirement: Can only choose "Stop" at step >= 6
+        # 用户要求：智能体至少在第 9 步才可以选择完成拓扑/停止生成 (step_count >= 8 means 8 steps completed)
         # self.step_count starts at 0.
-        # step_count=0 (1st Action) -> Cannot Stop
-        # ...
-        # step_count=4 (5th Action) -> Cannot Stop
-        # step_count=5 (6th Action) -> Can Stop
-        can_stop = self.step_count >= 5
+        # step >= 8 means "after 8 actions are taken"
+        can_stop = self.step_count >= 8
         masks.append([can_stop, True])
         
         # 2. Component Type Mask

@@ -56,6 +56,9 @@ class AlphaZeroTrainer:
         # Replay Buffer to store self-play examples
         # Reduced size to keep data fresh and learn from recent high-reward episodes
         self.replay_buffer = deque(maxlen=1000)
+        
+        # [NEW] Duplicate Topology Tracking
+        self.visited_topologies = set()
 
     def _create_inventory(self, num_sources=None, num_inductors=None):
         """
@@ -84,7 +87,7 @@ class AlphaZeroTrainer:
             
         return inventory
 
-    def self_play(self):
+    def self_play(self, temp=1.0):
         """
         Executes one episode of self-play.
         Returns a list of training examples: [(observation, policy, value), ...]
@@ -106,8 +109,7 @@ class AlphaZeroTrainer:
                 print(f"Clone: {s_clone}")
                 raise RuntimeError("Clone Mismatch")
 
-            # Temperature control: High exploration (temp=1) early on, then greedy (temp -> 0)
-            temp = 1 if step < 5 else 0.2
+            # Temperature is passed as argument
             pi = self.mcts.get_action_prob(self.env, temp=temp)
             
             # Store observation and policy. Value (z) will be filled after the episode ends.
@@ -115,7 +117,10 @@ class AlphaZeroTrainer:
             examples.append([obs_tensor, pi, None])
             
             # Choose action based on the policy distribution
-            action = np.random.choice(len(pi), p=pi)
+            if temp == 0:
+                action = np.argmax(pi)
+            else:
+                action = np.random.choice(len(pi), p=pi)
             
             # Execute action in the environment
             reward = self.env.step_flat(action)
@@ -124,9 +129,63 @@ class AlphaZeroTrainer:
             terminated, final_score = self.env.is_terminal()
             
             if terminated:
+                # [NEW] Duplicate Topology Check
+                # Calculate topology hash (invariant to Switch IDs)
+                topo_hash = self._get_topology_hash(self.env.env.circuit_graph)
+                
+                if topo_hash in self.visited_topologies:
+                    # Penalty for duplicate topology
+                    final_score = -200.0
+                    print(f"  [Duplicate] Topology {topo_hash[:8]} already seen. Penalizing.")
+                else:
+                    self.visited_topologies.add(topo_hash)
+                
                 # Episode finished. Backpropagate the final score as the value for all steps.
                 # Note: This treats the problem as a single-player optimization task.
                 return [(x[0], x[1], final_score) for x in examples]
+
+    def _get_topology_hash(self, graph):
+        """
+        Computes a hash for the circuit topology using Weisfeiler-Lehman algorithm.
+        Handles MultiGraph by converting edges to nodes in a bipartite-like structure.
+        Masks Switch IDs to ensure S1/S2 permutations are treated as identical.
+        """
+        import networkx as nx
+        from env.components import Switch
+        
+        # Transformation: Convert Edge-Labeled MultiGraph -> Node-Labeled Graph
+        # Original Nodes -> Nodes with label "Node"
+        # Edges -> Nodes with label "Component_Type" connected to original nodes
+        
+        G_prime = nx.Graph()
+        
+        # 1. Add Original Nodes
+        for n in graph.nodes():
+            G_prime.add_node(f"n_{n}", label="Node")
+            
+        # 2. Convert Components (Edges) to Nodes
+        # Use edge keys to handle parallel edges uniquely
+        for u, v, k, d in graph.edges(keys=True, data=True):
+            comp = d.get('component')
+            if comp:
+                if isinstance(comp, Switch):
+                    type_label = "Switch"
+                else:
+                    type_label = comp.name
+            else:
+                type_label = "Wire"
+                
+            # Create a unique node for this component
+            comp_node_id = f"c_{u}_{v}_{k}"
+            G_prime.add_node(comp_node_id, label=type_label)
+            
+            # Connect component node to circuit nodes
+            G_prime.add_edge(f"n_{u}", comp_node_id)
+            G_prime.add_edge(f"n_{v}", comp_node_id)
+            
+        # 3. Compute Hash on the transformed simple graph
+        # explicit node_attr='label'
+        return nx.weisfeiler_lehman_graph_hash(G_prime, node_attr='label')
 
     def train(self, num_iterations=10, episodes_per_iter=5):
         """
@@ -142,21 +201,31 @@ class AlphaZeroTrainer:
             new_examples = []
             from tqdm import tqdm
             for e in tqdm(range(episodes_per_iter), desc="Episodes"):
+                # Dynamic Temperature Schedule based on Episode Index
+                if e < 10:
+                    current_temp = 2.0 # High exploration (First 10 episodes)
+                elif e < 15:
+                    current_temp = 1 # Medium exploration (Next 5 episodes)
+                else:
+                    current_temp = 0.5 # Low exploration (Last 5+ episodes)
+
                 start_time = time.time()
-                episode_data = self.self_play()
+                episode_data = self.self_play(temp=current_temp)
                 new_examples.extend(episode_data)
                 duration = time.time() - start_time
-                tqdm.write(f"  Episode {e+1}: {len(episode_data)} steps, Reward={episode_data[0][2]:.4f}, Time={duration:.1f}s")
                 
+                # Check score of this episode
+                # episode_data is list of (obs, pi, z). z is the final score.
+                episode_score = episode_data[0][2]
+                
+                tqdm.write(f"  Episode {e+1}: {len(episode_data)} steps, Reward={episode_score:.4f}, Temp={current_temp}, Time={duration:.1f}s")
+                
+                # [NEW] Save ANY good circuit found during training
+                if episode_score > 0.5:
+                    self.save_best_circuit(self.env, episode_score, f"{i+1}_ep_{e+1}")
+
             self.replay_buffer.extend(new_examples)
             print(f"Buffer size: {len(self.replay_buffer)}")
-            
-            # Check and save the best circuit found in this iteration
-            # Check and save the best circuit found in this iteration
-            last_score = new_examples[-1][2]
-            # User Request: Save if Reward > 0.6
-            if last_score > 0.6: 
-                 self.save_best_circuit(self.env, last_score, i+1)
             
             # 2. Training: Update Neural Network
             print("Training network...")
@@ -196,8 +265,8 @@ class AlphaZeroTrainer:
                 print(f"  [Eval] Iter {iteration}: Steps={step}, Final Score={score:.4f}")
                 
                 # If good result, save plot
-                # User Request: Save if Reward > 0.6
-                if score > 0.6:
+                # User Request: Save if Reward > 0.5
+                if score > 0.5:
                     self.save_best_circuit(self.env, score, f"{iteration}_eval")
 
 
@@ -207,6 +276,52 @@ class AlphaZeroTrainer:
         filename = f"best_circuit_iter_{iteration}.png"
         print(f"  Saving best circuit with score {score:.4f} to {filename}")
         plot_circuit(env.env.circuit_graph, filename=filename)
+        
+        # [NEW] Also save text description
+        self.save_circuit_text(env, score, iteration)
+
+    def save_circuit_text(self, env, score, iteration):
+        """Saves the circuit topology map as a text file."""
+        import os
+        from env.components import Switch, VoltageSource, Inductor
+        
+        # specific directory for topologies
+        os.makedirs("saved_topologies", exist_ok=True)
+        filename = f"saved_topologies/topology_score_{score:.4f}_iter_{iteration}.txt"
+        
+        with open(filename, "w", encoding='utf-8') as f:
+            f.write(f"Circuit Topology (Score: {score:.4f}, Iteration: {iteration})\n")
+            f.write("="*50 + "\n\n")
+            f.write("Circuit Edges:\n")
+            
+            # Sort edges for consistent output
+            edges = list(env.env.circuit_graph.edges(data=True))
+            edges.sort(key=lambda x: (x[0], x[1]))
+            
+            for u, v, data in edges:
+                comp = data.get('component')
+                comp_name = comp.name if comp else "Unknown"
+                details = ""
+                if isinstance(comp, Switch):
+                    n1, n2 = comp.nodes
+                    # Assuming default diode direction for Switch (Source->Drain or Drain->Source?)
+                    # In components.py, Switch usually has body diode.
+                    # Let's print the actual nodes connected.
+                    # And infer diode direction if needed, but printing nodes is safest.
+                    # User output example: [Drain: 1, Source: 0, Body Diode: 0->1]
+                    # We'll approximate this format.
+                    details = f"[Drain: {n1}, Source: {n2}, Body Diode: {n2}->{n1}]"
+                elif isinstance(comp, VoltageSource):
+                    pos, neg = comp.nodes
+                    details = f"[Pos: {pos}, Neg: {neg}]"
+                elif isinstance(comp, Inductor):
+                    n1, n2 = comp.nodes
+                    details = f"[{n1}-{n2}]"
+                
+                line = f"  {u} <-> {v} : {comp_name} {details}\n"
+                f.write(line)
+        
+        print(f"  Saved topology description to {filename}")
 
     def train_network(self):
         """

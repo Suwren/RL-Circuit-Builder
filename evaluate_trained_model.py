@@ -13,7 +13,7 @@ from alphazero.model import AlphaZeroNet
 from alphazero.mcts import MCTS
 from alphazero.circuit_wrapper import CircuitEnvWrapper
 
-def evaluate_trained_model(model_path="models/alphazero_iter_41.pth"):
+def evaluate_trained_model(model_path="models/alphazero_iter_40.pth"):
     """
     Loads a trained AlphaZero model, generates a circuit, and prints detailed evaluation.
     """
@@ -35,7 +35,7 @@ def evaluate_trained_model(model_path="models/alphazero_iter_41.pth"):
     # 1 Inductor
     inventory.append(Inductor(name="L1", nodes=(0, 0), value=47e-6))
     # 4 Switches
-    for i in range(4):
+    for i in range(5):
         inventory.append(Switch(name=f"S{i+1}", nodes=(0, 0)))
         
     # Initialize Environment with verbose=True for detailed logging
@@ -43,8 +43,8 @@ def evaluate_trained_model(model_path="models/alphazero_iter_41.pth"):
     env = CircuitEnvWrapper(raw_env)
     
     # 2. Load Model
-    # Input channels: 9 (Adjacency) + 3 (Inventory Counts) + 4 (Node Features) = 16
-    input_channels = 16 
+    # Input channels: 6 (Directional Adjacency) + 3 (Inventory Counts) + 4 (Node Features) = 13
+    input_channels = 13 
     model = AlphaZeroNet(input_shape=(input_channels, max_nodes, max_nodes), 
                               num_actions=env.action_space_size()).to(device)
     
