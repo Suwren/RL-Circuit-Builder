@@ -222,15 +222,15 @@ class CircuitEnv(gym.Env):
         
         if missing_components:
             if self.verbose:
-                print(f"  [结果] 缺少关键组件 {missing_components}。惩罚: -100.0")
-            return -100.0
+                print(f"  [结果] 缺少关键组件 {missing_components}。惩罚: -200.0")
+            return -200.0
         
         # 2. Strict Switch Check (User Requirement)
         used_switches = len([d['component'] for u, v, d in self.circuit_graph.edges(data=True) if isinstance(d.get('component'), Switch)])
         if used_switches == 0:
             if self.verbose:
-                print(f"  [结果] 未放置任何开关。惩罚: -100.0")
-            return -100.0
+                print(f"  [结果] 未放置任何开关。惩罚: -200.0")
+            return -200.0
             
         # 3. Strict Dangling Node Check (User Requirement)
         dangling_nodes = [n for n, d in self.circuit_graph.degree() if d == 1]
@@ -268,19 +268,20 @@ class CircuitEnv(gym.Env):
             return score
             
         if not nx.is_connected(self.circuit_graph.to_undirected()):
-            return score - 10.0
+            if self.verbose:
+                print(f"  [结果] 电路不连通 (Disconnected Graph)。惩罚: -100.0")
+            return -100.0
             
         from utils.mode_analysis import analyze_switching_modes
         
-        # Define the 6 Scenarios
-        # Each tuple: (V1_role, V2_role, V3_role)
+        # 定义电压源的角色分配场景 (Define the 3 Scenarios)
+        # 每个元组格式: (V1_role, V2_role, V3_role)
+        # 根据用户要求，V1 固定为 "output"。
+        # We only consider 3 scenarios where V1 is always an OUTPUT.
         scenarios = [
-            ("input", "input", "output"), # 1. Dual Input, Single Output
-            ("input", "output", "input"), # 2. Dual Input, Single Output
-            ("output", "input", "input"), # 3. Dual Input, Single Output
-            ("input", "output", "output"), # 4. Single Input, Dual Output
-            ("output", "input", "output"), # 5. Single Input, Dual Output
-            ("output", "output", "input")  # 6. Single Input, Dual Output
+            ("output", "input", "output"), # 场景 1: V2 输入, V1/V3 输出 (Dual Output)
+            ("output", "output", "input"), # 场景 2: V3 输入, V1/V2 输出 (Dual Output)
+            ("output", "input", "input"),  # 场景 3: V2/V3 输入, V1 输出 (Dual Input)
         ]
         
         total_versatility_score = 0.0
@@ -429,8 +430,16 @@ class CircuitEnv(gym.Env):
         """
         masks = []
         
-        # 1. Action Type (Stop/Place) - Always valid
-        masks.append([True, True])
+        # 1. Action Type (Stop/Place)
+        # 用户要求：智能体至少在第 6 步才可以选择完成拓扑/停止生成
+        # User Requirement: Can only choose "Stop" at step >= 6
+        # self.step_count starts at 0.
+        # step_count=0 (1st Action) -> Cannot Stop
+        # ...
+        # step_count=4 (5th Action) -> Cannot Stop
+        # step_count=5 (6th Action) -> Can Stop
+        can_stop = self.step_count >= 5
+        masks.append([can_stop, True])
         
         # 2. Component Type Mask
         # Check availability of each type (V, L, S)

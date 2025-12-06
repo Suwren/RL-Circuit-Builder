@@ -10,7 +10,8 @@ def create_buck_circuit():
         Switch(name="S1", nodes=(0, 0)),                                       # Index 1
         Switch(name="S2", nodes=(0, 0)),                                       # Index 2 (Replaces Diode)
         Inductor(name="L1", nodes=(0, 0), value=100e-6),                       # Index 3
-        VoltageSource(name="V2", nodes=(3, 0), dc_value=5.0, role="output")    # Index 4: Pos=3, Neg=0
+        VoltageSource(name="V2", nodes=(3, 0), dc_value=5.0, role="output"),   # Index 4: Pos=3, Neg=0
+        VoltageSource(name="V3", nodes=(0, 0), dc_value=5.0, role="output")    # Index 5: Dummy V3
     ]
 
     # 2. Initialize Environment
@@ -28,6 +29,7 @@ def create_buck_circuit():
     # S2:  0 -> 2 (Synchronous Rectifier)
     # L1:  2 -> 3
     # V2: 0 -> 3 (Load)
+    # V3: Just placed floating or connected for inventory check
     
     # Add nodes
     env.circuit_graph.add_node(0, type="Ground") # 0 is usually treated as reference/ground implicitly or explicitly
@@ -51,6 +53,9 @@ def create_buck_circuit():
     
     # V2 (Index 4) -> Nodes 3, 0 (Pos, Neg)
     env._add_component_to_graph(4, 3, 0)
+    
+    # V3 (Index 5) -> Nodes 0, 0 (Short/Floating - just present for logic)
+    env._add_component_to_graph(5, 0, 0)
     
     print("\nCircuit Constructed. Nodes:", env.circuit_graph.nodes())
     print("Edges:")
