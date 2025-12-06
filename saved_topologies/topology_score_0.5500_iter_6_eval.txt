@@ -1,0 +1,12 @@
+Circuit Topology (Score: 0.5500, Iteration: 6_eval)
+==================================================
+
+Circuit Edges:
+  0 <-> 1 : L1 [0-1]
+  0 <-> 2 : V1 [Pos: 2, Neg: 0]
+  0 <-> 3 : S3 [Drain: 3, Source: 0, Body Diode: 0->3]
+  1 <-> 4 : V2 [Pos: 1, Neg: 4]
+  1 <-> 5 : S4 [Drain: 1, Source: 5, Body Diode: 5->1]
+  2 <-> 3 : S1 [Drain: 2, Source: 3, Body Diode: 3->2]
+  2 <-> 4 : S2 [Drain: 2, Source: 4, Body Diode: 4->2]
+  3 <-> 5 : V3 [Pos: 3, Neg: 5]

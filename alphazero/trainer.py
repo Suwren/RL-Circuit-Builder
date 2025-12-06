@@ -31,7 +31,7 @@ class AlphaZeroTrainer:
     def __init__(self, num_sources=2, num_inductors=1, max_nodes=12):
         # 1. Configuration Parameters
         self.max_nodes = max_nodes
-        self.num_simulations = 300  # Balanced search depth (User Request)
+        self.num_simulations = 200  # Balanced search depth (User Request)
         self.batch_size = 64
         self.epochs = 20 # Increased from 10 to learn more from limited data
         self.lr = 1e-3
@@ -55,7 +55,7 @@ class AlphaZeroTrainer:
         
         # Replay Buffer to store self-play examples
         # Reduced size to keep data fresh and learn from recent high-reward episodes
-        self.replay_buffer = deque(maxlen=1000)
+        self.replay_buffer = deque(maxlen=2000)
         
         # [NEW] Duplicate Topology Tracking
         self.visited_topologies = set()
@@ -135,13 +135,12 @@ class AlphaZeroTrainer:
                 
                 if topo_hash in self.visited_topologies:
                     # Penalty for duplicate topology
-                    final_score = -200.0
-                    print(f"  [Duplicate] Topology {topo_hash[:8]} already seen. Penalizing.")
+                    # Normalize to -1.0 (Bad outcome, discourages repetition)
+                    final_score = -1.0
+                    print(f"  [Duplicate] Topology {topo_hash[:8]} already seen. Reward -> -1.")
                 else:
                     self.visited_topologies.add(topo_hash)
-                
-                # Episode finished. Backpropagate the final score as the value for all steps.
-                # Note: This treats the problem as a single-player optimization task.
+
                 return [(x[0], x[1], final_score) for x in examples]
 
     def _get_topology_hash(self, graph):
